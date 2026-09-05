@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Pine Viewer</title>
+<style>
+  :root {
+    --bg: #1e1e2e;
+    --panel: #181825;
+    --border: #313244;
+    --text: #cdd6f4;
+    --muted: #6c7086;
+    --accent: #89b4fa;
+    --comment: #6c7086;
+    --string: #a6e3a1;
+    --number: #fab387;
+    --keyword: #cba6f7;
+    --builtin: #89b4fa;
+    --func: #f9e2af;
+    --seriesvar: #f38ba8;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", sans-serif;
+  }
+  #toolbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 14px; background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    user-select: none;
+  }
+  #toolbar button {
+    background: var(--border); color: var(--text);
+    border: 1px solid var(--muted); border-radius: 6px;
+    padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
+  #toolbar button:hover { background: var(--accent); color: #1e1e2e; }
+  #filename { color: var(--accent); font-weight: 600; }
+  #meta { color: var(--muted); margin-left: auto; }
+  #fontctl { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  #fontctl button { padding: 2px 8px; }
+
+  #dropzone {
+    position: fixed; inset: 0; z-index: 10;
+    background: rgba(137, 180, 250, 0.15);
+    border: 3px dashed var(--accent);
+    display: none; align-items: center; justify-content: center;
+    font-size: 22px; color: var(--accent); pointer-events: none;
+  }
+  #dropzone.active { display: flex; }
+
+  #viewer {
+    display: flex; height: calc(100% - 45px); overflow: auto;
+  }
+  #empty {
+    margin: auto; text-align: center; color: var(--muted); font-size: 15px;
+    user-select: none;
+  }
+  #empty kbd {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 4px; padding: 2px 6px;
+  }
+  #gutter {
+    flex: 0 0 auto; text-align: right; padding: 12px 10px 12px 16px;
+    color: var(--muted); background: var(--panel);
+    user-select: none; white-space: pre;
+    border-right: 1px solid var(--border);
+  }
+  pre#code {
+    margin: 0; padding: 12px 16px; white-space: pre;
+    flex: 1 1 auto;
+  }
+  #gutter, pre#code {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px; line-height: 20px;
+  }
+  .c-comment { color: var(--comment); font-style: italic; }
+  .c-string  { color: var(--string); }
+  .c-number  { color: var(--number); }
+  .c-keyword { color: var(--keyword); font-weight: 600; }
+  .c-builtin { color: var(--builtin); }
+  .c-func    { color: var(--func); }
+  .c-seriesvar { color: var(--seriesvar); }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <button id="openBtn">Open .pine File</button>
+  <button id="copyBtn">Copy Code</button>
+  <span id="filename"></span>
+  <div id="fontctl">
+    <button id="fontMinus">A-</button>
+    <button id="fontPlus">A+</button>
+  </div>
+  <span id="meta"></span>
+</div>
+
+<div id="dropzone">Drop .pine file to view</div>
+
+<div id="viewer">
+  <div id="empty">Drag &amp; drop a <kbd>.pine</kbd> file here, or click "Open .pine File"</div>
+</div>
+
+<input type="file" id="fileInput" accept=".pine,.txt" style="display:none">
+
+<script>
+const KEYWORDS = new Set([
+  "if","else","for","to","while","break","continue","var","varip","const",
+  "series","simple","input","import","export","method","type","enum",
+  "switch","case","and","or","not","true","false","na","int","float",
+  "bool","string","color","line","box","table","label","array","matrix",
+  "map","void","return","polyline"
+]);
+const NAMESPACES = new Set([
+  "ta","math","str","array","matrix","map","table","box","line","label",
+  "color","input","strategy","request","syminfo","timeframe","session",
+  "dayofweek","month","barstate","chart","ticker","runtime","log",
+  "polyline","format","currency","location","scale","shape","size",
+  "display","order","plot","extend","position","xloc","yloc","font",
+  "text","adjustment","alert","backadjustment","settlement_as_close",
+  "barmerge"
+]);
+const TOPLEVEL_BUILTINS = new Set([
+  "plot","plotshape","plotchar","plotarrow","plotbar","plotcandle",
+  "bgcolor","fill","hline","indicator","strategy","library",
+  "alertcondition","alert","time","timenow","hour","minute","second",
+  "dayofweek","weekofyear","na","nz","fixnan","max_bars_back",
+  "runtime","var","input"
+]);
+const SERIES_VARS = new Set([
+  "open","high","low","close","volume","time","bar_index","hl2","hlc3",
+  "ohlc4","last_bar_index","last_bar_time","n"
+]);
+
+const TOKEN_RE = /(\/\/.*)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(#[0-9a-fA-F]{6,8}\b)|(\b\d+\.?\d*(?:[eE][+-]?\d+)?\b)|([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)/g;
+
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function highlightPine(code) {
+  const escaped = escapeHtml(code);
+  return escaped.replace(TOKEN_RE, (match, comment, str, colorHex, num, word, offset) => {
+    if (comment) return `<span class="c-comment">${match}</span>`;
+    if (str) return `<span class="c-string">${match}</span>`;
+    if (colorHex) return `<span class="c-number">${match}</span>`;
+    if (num) return `<span class="c-number">${match}</span>`;
+    if (word) {
+      const dot = word.indexOf(".");
+      const first = dot === -1 ? word : word.slice(0, dot);
+      const rest = escaped.slice(offset + match.length);
+      const calledNext = /^\s*\(/.test(rest);
+      if (calledNext && dot !== -1 && NAMESPACES.has(first)) return `<span class="c-builtin">${match}</span>`;
+      if (calledNext && TOPLEVEL_BUILTINS.has(word)) return `<span class="c-builtin">${match}</span>`;
+      if (calledNext) return `<span class="c-func">${match}</span>`;
+      if (KEYWORDS.has(word)) return `<span class="c-keyword">${match}</span>`;
+      if (SERIES_VARS.has(word)) return `<span class="c-seriesvar">${match}</span>`;
+      if (dot !== -1 && NAMESPACES.has(first)) return `<span class="c-builtin">${match}</span>`;
+      return match;
+    }
+    return match;
+  });
+}
+
+const viewer = document.getElementById("viewer");
+const filenameEl = document.getElementById("filename");
+const metaEl = document.getElementById("meta");
+const dropzone = document.getElementById("dropzone");
+const fileInput = document.getElementById("fileInput");
+
+let fontSize = 13;
+let currentText = "";
+
+function render(name, text) {
+  currentText = text;
+  filenameEl.textContent = name;
+  const lines = text.split("\n");
+  metaEl.textContent = `${lines.length} lines · ${text.length.toLocaleString()} chars`;
+
+  const gutterHtml = lines.map((_, i) => i + 1).join("\n");
+  const codeHtml = highlightPine(text);
+
+  viewer.innerHTML = `
+    <div id="gutter">${gutterHtml}</div>
+    <pre id="code"><code>${codeHtml}</code></pre>
+  `;
+  applyFontSize();
+
+  try {
+    localStorage.setItem("pineViewer.lastName", name);
+    localStorage.setItem("pineViewer.lastText", text);
+  } catch (e) { /* storage may be unavailable, ignore */ }
+}
+
+function applyFontSize() {
+  document.getElementById("gutter")?.style.setProperty("font-size", fontSize + "px");
+  document.getElementById("code")?.style.setProperty("font-size", fontSize + "px");
+  const lh = Math.round(fontSize * 1.55);
+  document.getElementById("gutter")?.style.setProperty("line-height", lh + "px");
+  document.getElementById("code")?.style.setProperty("line-height", lh + "px");
+}
+
+function loadFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => render(file.name, reader.result);
+  reader.readAsText(file);
+}
+
+document.getElementById("openBtn").addEventListener("click", async () => {
+  if (window.showOpenFilePicker) {
+    try {
+      const [handle] = await window.showOpenFilePicker({
+        types: [{ description: "Pine Script", accept: { "text/plain": [".pine", ".txt"] } }]
+      });
+      const file = await handle.getFile();
+      loadFile(file);
+    } catch (e) { /* user cancelled */ }
+  } else {
+    fileInput.click();
+  }
+});
+
+fileInput.addEventListener("change", (e) => {
+  if (e.target.files[0]) loadFile(e.target.files[0]);
+});
+
+document.getElementById("fontPlus").addEventListener("click", () => {
+  fontSize = Math.min(fontSize + 1, 28);
+  applyFontSize();
+});
+document.getElementById("fontMinus").addEventListener("click", () => {
+  fontSize = Math.max(fontSize - 1, 9);
+  applyFontSize();
+});
+
+const copyBtn = document.getElementById("copyBtn");
+copyBtn.addEventListener("click", async () => {
+  if (!currentText) return;
+  try {
+    await navigator.clipboard.writeText(currentText);
+    const original = copyBtn.textContent;
+    copyBtn.textContent = "Copied!";
+    setTimeout(() => { copyBtn.textContent = original; }, 1200);
+  } catch (e) {
+    alert("Copy failed: " + e.message);
+  }
+});
+
+["dragenter", "dragover"].forEach(evt =>
+  window.addEventListener(evt, (e) => {
+    e.preventDefault();
+    dropzone.classList.add("active");
+  })
+);
+["dragleave", "drop"].forEach(evt =>
+  window.addEventListener(evt, (e) => {
+    e.preventDefault();
+    if (evt === "dragleave" && e.target !== dropzone) return;
+    dropzone.classList.remove("active");
+  })
+);
+window.addEventListener("drop", (e) => {
+  const file = e.dataTransfer.files[0];
+  if (file) loadFile(file);
+});
+
+// Restore last viewed file on reload
+try {
+  const lastName = localStorage.getItem("pineViewer.lastName");
+  const lastText = localStorage.getItem("pineViewer.lastText");
+  if (lastName && lastText) render(lastName, lastText);
+} catch (e) { /* ignore */ }
+</script>
+</body>
+</html>

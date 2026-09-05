@@ -1,0 +1,9 @@
+# Local Claude Code settings (machine-specific paths)
+.claude/settings.local.json
+
+# Source material and personal data — kept local, not published
+transcripts/
+rdforex/
+
+# macOS
+.DS_Store
