@@ -2,6 +2,27 @@
 
 All notable changes to the LSD Zone Indicator are documented here.
 
+## [4.7.1] — 2026-09-05
+
+### Removed
+- `alertFormat` input — declared but never read; both alert emitters always emitted
+  Discord embed JSON regardless of its value
+- `fvgWindow` input — declared but never read; the FVG scan has always used
+  `impulseWindow`'s window, not this one
+- `alertOnInvalid` / `alertOnPreArmTap` inputs and their `invalidMsg()` / `preArmMsg()`
+  builders — only entry-signal alerts (`alertOnEntry`) remain configurable
+- Gold `fvgBorder` zone border — FVG is now indicated by a `(FVG)` tag in the zone label
+  text instead, restored from variant A's `zoneLabelText(isDemand, state, isFVG)`
+
+### Changed
+- Trade-stats month filter: replaced the `monthOffset` integer input with `statsMonthStr`
+  / `statsYearStr` "Auto" dropdowns (variant A's original design). "Auto" resolves against
+  `timenow` at runtime, working around Pine Script's `const`-only `input.*` defaults.
+
+### Fixed
+- `demandFVG` / `supplyFVG` were pushed on zone creation but never read back; they now
+  drive the `(FVG)` zone-label tag at every state transition, not just at creation.
+
 ## [4.7.0] — 2026-09-05
 
 Initial versioned baseline, corresponding to the `indicator("LSD Zone Detector V4.7")`

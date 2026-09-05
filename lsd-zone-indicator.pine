@@ -31,11 +31,6 @@ tagDeathsOnChart = input.bool(true, "Tag Deaths On Chart", group=grpDetect,
                 tooltip="Drops a small ☠ label at the exact bar and price where each zone died, so no zone can vanish without saying why.")
 deathLogRows = input.int(6, "Death Log Rows", minval=1, maxval=15, group=grpDetect)
 
-grpFVG = "FVG (always detected)"
-fvgWindow = input.int(5, "FVG Search Window", minval=3, maxval=10,
-            tooltip="FVG zones always shown — gold border when detected.",
-            group=grpFVG)
-
 grpLiq = "Liquidity Setup (LSD)"
 liqScanBars = input.int(40, "Liquidity Scan Range (bars)", minval=10, maxval=100,
                    tooltip="How far back to search for the most recent completed pullback run.",
@@ -87,26 +82,43 @@ statsPos = input.string("Bottom Left", "Stats Position",
                  options=["Top Right","Top Left","Bottom Right","Bottom Left"],
                  group=grpStats)
 monthOnly = input.bool(false, "Current Month Only",
-                 tooltip="Count only trades entered in the target month. Uses the real-world clock, not the chart's last bar.",
+                 tooltip="Count only trades entered in the target month/year below. Defaults to the real-world current month, not the chart's last bar.",
                  group=grpStats)
-monthOffset = input.int(0, "Month Offset (0 = this month)", minval=0, maxval=240,
-                 tooltip="0 = current month, 1 = last month, 2 = two months ago. Walks back across years.",
+// Pine requires const input defaults, so "Auto" is the sentinel that resolves
+// to the real-world clock month/year at runtime.
+statsMonthStr = input.string("Auto", "Month",
+                 options=["Auto","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"],
+                 tooltip="Auto = the current real-world month.",
                  group=grpStats)
+statsYearStr = input.string("Auto", "Year",
+                 options=["Auto","2000","2001","2002","2003","2004","2005","2006","2007","2008","2009",
+                          "2010","2011","2012","2013","2014","2015","2016","2017","2018","2019",
+                          "2020","2021","2022","2023","2024","2025","2026"],
+                 tooltip="Auto = the current real-world year. Pine needs this list to be literal, so add the next year to it each January — Auto keeps working regardless.",
+                 group=grpStats)
+statsMonth = switch statsMonthStr
+    "Jan" => 1
+    "Feb" => 2
+    "Mar" => 3
+    "Apr" => 4
+    "May" => 5
+    "Jun" => 6
+    "Jul" => 7
+    "Aug" => 8
+    "Sep" => 9
+    "Oct" => 10
+    "Nov" => 11
+    "Dec" => 12
+    => month(timenow, "UTC")
+// Clamp guards the case where the literal list has outrun the clock.
+nowYearUTC = year(timenow, "UTC")
+statsYearPick = int(math.round(str.tonumber(statsYearStr)))
+statsYear = statsYearStr == "Auto" ? nowYearUTC : math.min(statsYearPick, nowYearUTC)
 
 grpAlerts = "Unified Alerts"
 alertOnEntry = input.bool(true, "Alert on Entry Signals", group=grpAlerts)
-alertOnInvalid = input.bool(true, "Alert When Tapped Zone Dies",
-                 tooltip="Fires if a zone you were alerted about closes inside and invalidates.",
-                 group=grpAlerts)
-alertOnPreArmTap = input.bool(false, "Alert on Pre-Arm Taps",
-                 tooltip="Fires when a zone is tapped and killed before it ever armed (liquidity + BoS never confirmed). Off by default — usually just noise since these were never tradeable.",
-                 group=grpAlerts)
 alertsIgnoreSession = input.bool(true, "Alerts Fire All Day (ignore session filter)",
                  tooltip="On: alerts fire around the clock and are tagged in/out of session. Off: alerts respect 'Only Trade Inside RD Session'.",
-                 group=grpAlerts)
-alertFormat = input.string("Discord JSON", "Alert Payload Format",
-                 options=["Plain Text", "Discord JSON", "Generic JSON"],
-                 tooltip="Discord JSON sends colour-coded embeds straight to a Discord webhook. Generic JSON sends {\"content\":\"...\"}. Plain Text is human-readable only.",
                  group=grpAlerts)
 
 grpMonitor = "Session Trade Monitor"
@@ -139,7 +151,6 @@ demandCol = input.color(color.new(#00C087, 80), "Demand Fill", group=grpColors)
 demandBorder = input.color(color.new(#00C087, 0), "Demand Border", group=grpColors)
 supplyCol = input.color(color.new(#FF4D4D, 80), "Supply Fill", group=grpColors)
 supplyBorder = input.color(color.new(#FF4D4D, 0), "Supply Border", group=grpColors)
-fvgBorder = input.color(color.new(#FFD700, 0), "FVG Zone Border", group=grpColors)
 entryDemandCol = input.color(color.new(#1E90FF, 80), "Demand Entry Fill", group=grpColors)
 entrySupplyCol = input.color(color.new(#FFA500, 80), "Supply Entry Fill", group=grpColors)
 invalidCol = input.color(color.new(#808080, 85), "Invalid Fill", group=grpColors)
@@ -682,8 +693,8 @@ drawTrade(float entryP, float slP, bool isLong) =>
                   style=label.style_label_left, color=#00000000,
                   textcolor=color.new(#00C087, 0), size=size.small)
 
-zoneLabelText(bool isDemand, int state) =>
-    base = isDemand ? "DEMAND" : "SUPPLY"
+zoneLabelText(bool isDemand, int state, bool isFVG) =>
+    base = (isDemand ? "DEMAND" : "SUPPLY") + (isFVG ? " (FVG)" : "")
     string outTxt = base
     if state == 0
         outTxt := base + " · 0 hunting liquidity"
@@ -743,12 +754,9 @@ var string[] trKind = array.new_string()  // "CLOSE" / "BOC" / "FLIP" — which 
 var int[] trSession = array.new_int()     // 0=Asia 1=London 2=NY 3=Overlap 4=Off-hours
 var int[] trTime = array.new_int()        // entry bar time, for month filtering
 
-// ── Target month (real-world clock, walked back by monthOffset) ──────────────
-nowYear = year(timenow, "UTC")
-nowMonth = month(timenow, "UTC")
-totalMonths = nowYear * 12 + (nowMonth - 1) - monthOffset
-int tgtYear = int(math.floor(totalMonths / 12))
-int tgtMonth = int(totalMonths % 12) + 1
+// ── Target month (from Month/Year inputs, defaults to real-world current month) ──
+int tgtYear = statsYear
+int tgtMonth = statsMonth
 tgtStamp = timestamp("UTC", tgtYear, tgtMonth, 1, 0, 0)
 
 // Session buckets: idx = bucket*4 + metric
@@ -832,26 +840,6 @@ entryMsg(string dir, string kind, float entryP, float slP, bool isLong, bool all
      '{"name":"SL","value":"' + str.tostring(slP, format.mintick) + '","inline":true},' +
      '{"name":"TP (1:' + str.tostring(rrTarget, "#.#") + ')","value":"' + str.tostring(tp, format.mintick) + '","inline":true},' +
      '{"name":"Risk","value":"' + str.tostring(riskPts, format.mintick) + '","inline":true},' +
-     '{"name":"Session","value":"' + sessTxt + '","inline":true}' +
-     ']}'
-
-invalidMsg(string dir, float zTop, float zBot) =>
-    title = jsonEscape((dir == "BUY" ? "⚪ BUY" : "⚪ SELL") + " ZONE DEAD — " + syminfo.ticker)
-    sessTxt = jsonEscape(sessionTag(tradeAllowed))
-    '{"title":"' + title + '","description":"Candle closed inside the zone — setup invalid, do not enter.","color":' + str.tostring(COL_DEAD) +
-     ',"fields":[' +
-     '{"name":"Zone","value":"' + str.tostring(zBot, format.mintick) + " – " + str.tostring(zTop, format.mintick) + '","inline":true},' +
-     '{"name":"Close","value":"' + str.tostring(close, format.mintick) + '","inline":true},' +
-     '{"name":"Session","value":"' + sessTxt + '","inline":true}' +
-     ']}'
-
-preArmMsg(string dir, float zTop, float zBot) =>
-    title = jsonEscape((dir == "BUY" ? "⚫ BUY" : "⚫ SELL") + " ZONE KILLED PRE-ARM — " + syminfo.ticker)
-    sessTxt = jsonEscape(sessionTag(tradeAllowed))
-    '{"title":"' + title + '","description":"Tapped before liquidity + BoS confirmed — never became tradeable.","color":' + str.tostring(COL_DEAD) +
-     ',"fields":[' +
-     '{"name":"Zone","value":"' + str.tostring(zBot, format.mintick) + " – " + str.tostring(zTop, format.mintick) + '","inline":true},' +
-     '{"name":"Price","value":"' + str.tostring(close, format.mintick) + '","inline":true},' +
      '{"name":"Session","value":"' + sessTxt + '","inline":true}' +
      ']}'
 
@@ -941,8 +929,6 @@ closedInsideDemand(box zone, line liqLn, int i) =>
     zTopD = box.get_top(zone)
     zBotD = box.get_bottom(zone)
     logDeath(true, zTopD, zBotD, array.get(demandState, i), "closed inside")
-    if alertOnInvalid and array.get(demandTapAlerted, i) and alertsAllowed(tradeAllowed)
-        array.push(msgQueue, invalidMsg("BUY", zTopD, zBotD))
     deadBox = box.new(
          left=box.get_left(zone), top=box.get_top(zone), right=bar_index, bottom=box.get_bottom(zone),
          bgcolor=invalidCol, border_color=color.gray,
@@ -960,8 +946,6 @@ closedInsideSupply(box zone, line liqLn, int i) =>
     zTopS = box.get_top(zone)
     zBotS = box.get_bottom(zone)
     logDeath(false, zTopS, zBotS, array.get(supplyState, i), "closed inside")
-    if alertOnInvalid and array.get(supplyTapAlerted, i) and alertsAllowed(tradeAllowed)
-        array.push(msgQueue, invalidMsg("SELL", zTopS, zBotS))
     deadBox = box.new(
          left=box.get_left(zone), top=box.get_top(zone), right=bar_index, bottom=box.get_bottom(zone),
          bgcolor=invalidCol, border_color=color.gray,
@@ -1084,8 +1068,8 @@ if newDemand
                 demandBox = box.new(
                      left=markBarAbs, top=zTop,
                      right=bar_index + extendBars, bottom=zBottom,
-                     bgcolor=demandCol, border_color=demandHasFVGNow ? fvgBorder : demandBorder, border_width=1,
-                     text=zoneLabelText(true, 0),
+                     bgcolor=demandCol, border_color=demandBorder, border_width=1,
+                     text=zoneLabelText(true, 0, demandHasFVGNow),
                      text_color=demandBorder, text_size=size.small)
                 array.push(demandBoxes, demandBox)
                 array.push(demandInvalid, false)
@@ -1143,8 +1127,8 @@ if newSupply
                 supplyBox = box.new(
                      left=markBarAbs, top=zTop,
                      right=bar_index + extendBars, bottom=zBottom,
-                     bgcolor=supplyCol, border_color=supplyHasFVGNow ? fvgBorder : supplyBorder, border_width=1,
-                     text=zoneLabelText(false, 0),
+                     bgcolor=supplyCol, border_color=supplyBorder, border_width=1,
+                     text=zoneLabelText(false, 0, supplyHasFVGNow),
                      text_color=supplyBorder, text_size=size.small)
                 array.push(supplyBoxes, supplyBox)
                 array.push(supplyInvalid, false)
@@ -1229,8 +1213,6 @@ if barstate.isconfirmed and array.size(demandBoxes) > 0
         if state <= 1
             if low <= zTop
                 logDeath(true, zTop, zBot, state, "pre-arm tap")
-                if alertOnPreArmTap and alertsAllowed(tradeAllowed)
-                    array.push(msgQueue, preArmMsg("BUY", zTop, zBot))
                 if markPreArmTaps
                     box.set_right(zone, bar_index)
                     box.set_bgcolor(zone, invalidCol)
@@ -1278,7 +1260,7 @@ if barstate.isconfirmed and array.size(demandBoxes) > 0
                         array.set(demandLiqLow, i, dLiqLevel2)
                         array.set(demandOriginHi, i, dOriginHigh2)
                         array.set(demandState, i, 1)
-                        box.set_text(zone, zoneLabelText(true, 1))
+                        box.set_text(zone, zoneLabelText(true, 1, array.get(demandFVG, i)))
             else
                 // State 1 is PATIENT: price may wander freely. The zone arms
                 // only when the origin high is broken (BoS).
@@ -1307,7 +1289,7 @@ if barstate.isconfirmed and array.size(demandBoxes) > 0
                 if bosHit
                     drawBoS(createdBar, originHi, bosCol, true)
                     array.set(demandState, i, 2)
-                    box.set_text(zone, zoneLabelText(true, 2))
+                    box.set_text(zone, zoneLabelText(true, 2, array.get(demandFVG, i)))
                     box.set_border_width(zone, 2)
                     demandArmedNow := true
 
@@ -1431,8 +1413,6 @@ if barstate.isconfirmed and array.size(supplyBoxes) > 0
         if state <= 1
             if high >= zBot
                 logDeath(false, zTop, zBot, state, "pre-arm tap")
-                if alertOnPreArmTap and alertsAllowed(tradeAllowed)
-                    array.push(msgQueue, preArmMsg("SELL", zTop, zBot))
                 if markPreArmTaps
                     box.set_right(zone, bar_index)
                     box.set_bgcolor(zone, invalidCol)
@@ -1477,7 +1457,7 @@ if barstate.isconfirmed and array.size(supplyBoxes) > 0
                         array.set(supplyLiqHigh, i, zLiqS)
                         array.set(supplyOriginLo, i, zOriginS)
                         array.set(supplyState, i, 1)
-                        box.set_text(zone, zoneLabelText(false, 1))
+                        box.set_text(zone, zoneLabelText(false, 1, array.get(supplyFVG, i)))
             else
                 // State 1 is PATIENT: price may wander freely. The zone arms
                 // only when the origin low is broken (BoS).
@@ -1506,7 +1486,7 @@ if barstate.isconfirmed and array.size(supplyBoxes) > 0
                 if bosHit
                     drawBoS(createdBar, originLo, bearBosCol, false)
                     array.set(supplyState, i, 2)
-                    box.set_text(zone, zoneLabelText(false, 2))
+                    box.set_text(zone, zoneLabelText(false, 2, array.get(supplyFVG, i)))
                     box.set_border_width(zone, 2)
                     supplyArmedNow := true
 

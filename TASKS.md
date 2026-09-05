@@ -37,37 +37,7 @@ overlap check also scans.
 **Open decision:** should suppression expire after a fixed number of bars, or persist until
 price has moved a set distance (× ATR) away from the zone?
 
-### 2. `alertFormat` input does nothing
-**Priority: medium** · confirmed in code
-
-`alertFormat` (line 107) offers "Plain Text" / "Discord JSON" / "Generic JSON", but the
-identifier appears exactly once in the file — it is never read. Both emitters hardcode the
-Discord embed shape:
-
-```pine
-alert('{"embeds":[' + array.join(bocQueue, ",") + ']}', ...)   // line 1848
-alert('{"embeds":[' + array.join(msgQueue, ",") + ']}', ...)   // line 1932
-```
-
-Either wire the input up to all three payload shapes, or remove it. Any change must keep the
-Discord embed shape byte-identical for existing webhook consumers.
-
-### 3. `fvgWindow` input does nothing
-**Priority: medium** · confirmed in code
-
-`fvgWindow` (line 35, "FVG Search Window") is never read. The FVG scan in `findDemand()` /
-`findSupply()` iterates `for j = winStart to m - 1` (line 352), where `winStart` derives from
-`impulseWindow`, not `fvgWindow`. Either wire it in or remove the input.
-
-### 4. FVG detection result is stored but never used
-**Priority: low** · confirmed in code
-
-`demandFVG` / `supplyFVG` (lines 704, 719) are pushed on zone creation (lines 1094, 1153) and
-shifted on eviction, but never read back — there is no `array.get(demandFVG, ...)` anywhere.
-FVG currently only affects the zone border colour at creation time (`fvgBorder`, lines 1087,
-1146). Either consume the arrays or drop them.
-
-### 5. Liquidity debug panel silently switches zones
+### 2. Liquidity debug panel silently switches zones
 **Priority: low** · documented in the tooltip at line 52
 
 The panel always reports whichever zone is newest with `state >= 1`, not a zone you pinned, so
@@ -77,7 +47,7 @@ it changes subject without warning. Add a way to pin the panel to one zone.
 
 ## Features to port from variant A (`8beae64`)
 
-### 6. True HTF candle-flip detection
+### 3. True HTF candle-flip detection
 **Priority: high**
 
 The base fires the FLIP model on `isHTFOpen` — any new 30m/1h candle opening. That is not a
@@ -89,7 +59,7 @@ flipping candle's wick actually reached the zone.
 Port A's SECTION 5 and the `demandFlipSig` / `supplyFlipSig` / `demandFlipLow` /
 `supplyFlipHigh` wiring into the state machines.
 
-### 7. Entry log panel
+### 4. Entry log panel
 **Priority: medium**
 
 A's SECTION 19 plus `logEntry()` and its eight backing arrays: one row per entry signal that
@@ -97,11 +67,35 @@ fired — model, entry, SL, originating zone top, and whether it was taken, bloc
 session filter, or excluded as wicked-through. Useful alongside the existing zone death log
 for working out why a setup did or did not trade.
 
-### 8. FVG tag in the zone label
-**Priority: low**
+---
 
-A's `zoneLabelText(isDemand, state, isFVG)` renders `DEMAND (FVG)`. The base signature drops
-the `isFVG` parameter and shows FVG only as a border colour. Pairs naturally with item 4.
+## Resolved
+
+### `alertFormat` input did nothing — removed
+Fixed in `chore/cleanup-alerts-fvg-monthly-stats`. The input offered "Plain Text" /
+"Discord JSON" / "Generic JSON" but was never read — both alert emitters hardcode the Discord
+embed shape. Removed rather than wired in, since nothing consumes the other two formats.
+
+### `fvgWindow` input did nothing — removed
+Fixed in `chore/cleanup-alerts-fvg-monthly-stats`. The FVG scan in `findDemand()` /
+`findSupply()` has always used `impulseWindow`'s `winStart`, not `fvgWindow`. Removed the
+input and its `grpFVG` group.
+
+### FVG detection result was stored but never used — now read
+Fixed in `chore/cleanup-alerts-fvg-monthly-stats`. `demandFVG` / `supplyFVG` are now read via
+`zoneLabelText(isDemand, state, isFVG)`, restoring the `(FVG)` label tag on zone text at every
+state transition. The gold `fvgBorder` zone border was dropped in favour of the label tag —
+zones render with their normal demand/supply border colour regardless of FVG.
+
+### Alert-on-invalid / alert-on-pre-arm-tap toggles — removed
+Not originally tracked here. `alertOnInvalid`, `alertOnPreArmTap` and their `invalidMsg()` /
+`preArmMsg()` builders were removed by request — only `alertOnEntry` remains configurable.
+
+### Trade-stats month filter — restored Auto Month/Year dropdowns
+Not originally tracked here. `monthOffset` (a single int walking back from the current month)
+was replaced with the `statsMonthStr` / `statsYearStr` "Auto" dropdown pair used in variant A
+— Pine Script requires `input.*` defaults to be `const`, so "Auto" is the sentinel resolved
+against `timenow` at runtime. Add next year to the `statsYearStr` options list each January.
 
 ---
 
