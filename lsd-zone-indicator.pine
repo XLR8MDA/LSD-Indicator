@@ -30,9 +30,11 @@ showDeathLog = input.bool(true, "Show Zone Death Log", group=grpDetect,
 tagDeathsOnChart = input.bool(true, "Tag Deaths On Chart", group=grpDetect,
                 tooltip="Drops a small ☠ label at the exact bar and price where each zone died, so no zone can vanish without saying why.")
 deathLogRows = input.int(6, "Death Log Rows", minval=1, maxval=15, group=grpDetect)
-showEntryLog = input.bool(false, "Show Entry Log", group=grpDetect,
-                tooltip="Every entry signal that fired: model, entry, SL, the zone it came from, and whether it was taken, blocked by the session filter, or excluded as wicked-through. Zone TOP identifies which zone — rows sharing a TOP are the same zone.")
-entryLogRows = input.int(8, "Entry Log Rows", minval=1, maxval=20, group=grpDetect)
+
+grpFVG = "FVG (always detected)"
+fvgWindow = input.int(5, "FVG Search Window", minval=3, maxval=10,
+            tooltip="FVG zones always shown — gold border when detected.",
+            group=grpFVG)
 
 grpLiq = "Liquidity Setup (LSD)"
 liqScanBars = input.int(40, "Liquidity Scan Range (bars)", minval=10, maxval=100,
@@ -85,43 +87,26 @@ statsPos = input.string("Bottom Left", "Stats Position",
                  options=["Top Right","Top Left","Bottom Right","Bottom Left"],
                  group=grpStats)
 monthOnly = input.bool(false, "Current Month Only",
-                 tooltip="Count only trades entered in the target month/year below. Defaults to the real-world current month, not the chart's last bar.",
+                 tooltip="Count only trades entered in the target month. Uses the real-world clock, not the chart's last bar.",
                  group=grpStats)
-// Pine requires const input defaults, so "Auto" is the sentinel that resolves
-// to the real-world clock month/year at runtime.
-statsMonthStr = input.string("Auto", "Month",
-                 options=["Auto","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"],
-                 tooltip="Auto = the current real-world month.",
+monthOffset = input.int(0, "Month Offset (0 = this month)", minval=0, maxval=240,
+                 tooltip="0 = current month, 1 = last month, 2 = two months ago. Walks back across years.",
                  group=grpStats)
-statsYearStr = input.string("Auto", "Year",
-                 options=["Auto","2000","2001","2002","2003","2004","2005","2006","2007","2008","2009",
-                          "2010","2011","2012","2013","2014","2015","2016","2017","2018","2019",
-                          "2020","2021","2022","2023","2024","2025","2026"],
-                 tooltip="Auto = the current real-world year. Pine needs this list to be literal, so add the next year to it each January — Auto keeps working regardless.",
-                 group=grpStats)
-statsMonth = switch statsMonthStr
-    "Jan" => 1
-    "Feb" => 2
-    "Mar" => 3
-    "Apr" => 4
-    "May" => 5
-    "Jun" => 6
-    "Jul" => 7
-    "Aug" => 8
-    "Sep" => 9
-    "Oct" => 10
-    "Nov" => 11
-    "Dec" => 12
-    => month(timenow, "UTC")
-// Clamp guards the case where the literal list has outrun the clock.
-nowYearUTC = year(timenow, "UTC")
-statsYearPick = int(math.round(str.tonumber(statsYearStr)))
-statsYear = statsYearStr == "Auto" ? nowYearUTC : math.min(statsYearPick, nowYearUTC)
 
 grpAlerts = "Unified Alerts"
 alertOnEntry = input.bool(true, "Alert on Entry Signals", group=grpAlerts)
+alertOnInvalid = input.bool(true, "Alert When Tapped Zone Dies",
+                 tooltip="Fires if a zone you were alerted about closes inside and invalidates.",
+                 group=grpAlerts)
+alertOnPreArmTap = input.bool(false, "Alert on Pre-Arm Taps",
+                 tooltip="Fires when a zone is tapped and killed before it ever armed (liquidity + BoS never confirmed). Off by default — usually just noise since these were never tradeable.",
+                 group=grpAlerts)
 alertsIgnoreSession = input.bool(true, "Alerts Fire All Day (ignore session filter)",
                  tooltip="On: alerts fire around the clock and are tagged in/out of session. Off: alerts respect 'Only Trade Inside RD Session'.",
+                 group=grpAlerts)
+alertFormat = input.string("Discord JSON", "Alert Payload Format",
+                 options=["Plain Text", "Discord JSON", "Generic JSON"],
+                 tooltip="Discord JSON sends colour-coded embeds straight to a Discord webhook. Generic JSON sends {\"content\":\"...\"}. Plain Text is human-readable only.",
                  group=grpAlerts)
 
 grpMonitor = "Session Trade Monitor"
@@ -154,6 +139,7 @@ demandCol = input.color(color.new(#00C087, 80), "Demand Fill", group=grpColors)
 demandBorder = input.color(color.new(#00C087, 0), "Demand Border", group=grpColors)
 supplyCol = input.color(color.new(#FF4D4D, 80), "Supply Fill", group=grpColors)
 supplyBorder = input.color(color.new(#FF4D4D, 0), "Supply Border", group=grpColors)
+fvgBorder = input.color(color.new(#FFD700, 0), "FVG Zone Border", group=grpColors)
 entryDemandCol = input.color(color.new(#1E90FF, 80), "Demand Entry Fill", group=grpColors)
 entrySupplyCol = input.color(color.new(#FFA500, 80), "Supply Entry Fill", group=grpColors)
 invalidCol = input.color(color.new(#808080, 85), "Invalid Fill", group=grpColors)
@@ -321,72 +307,12 @@ if showDashboard and barstate.islast
     setRow(dashTable, 6, "RD Session", rdStr, rdColor)
 
 //=====================================================
-// SECTION 5 — HTF CANDLE FLIP DETECTION (for Flip Entry)
+// SECTION 5 — HTF CANDLE OPEN DETECTION (for Flip Entry)
 //=====================================================
 
 is_new_30m = not na(time("30")) and time("30") != time("30")[1]
 is_new_1h = not na(time("60")) and time("60") != time("60")[1]
-
-// A flip is the HTF candle opening, trading through its own open price, then
-// closing back on the other side of it. It develops across the whole HTF
-// candle, so it cannot be judged from the candle's first chart bar alone.
-// Each new HTF candle restarts its own watch.
-var float h30Open = na
-var bool h30Below = false
-var bool h30Above = false
-var float h30Low = na
-var float h30High = na
-var float h60Open = na
-var bool h60Below = false
-var bool h60Above = false
-var float h60Low = na
-var float h60High = na
-
-if barstate.isconfirmed
-    if is_new_30m
-        h30Open := open
-        h30Below := false
-        h30Above := false
-        h30Low := low
-        h30High := high
-    if is_new_1h
-        h60Open := open
-        h60Below := false
-        h60Above := false
-        h60Low := low
-        h60High := high
-    if not na(h30Open)
-        if low < h30Open
-            h30Below := true
-        if high > h30Open
-            h30Above := true
-        h30Low := math.min(h30Low, low)
-        h30High := math.max(h30High, high)
-    if not na(h60Open)
-        if low < h60Open
-            h60Below := true
-        if high > h60Open
-            h60Above := true
-        h60Low := math.min(h60Low, low)
-        h60High := math.max(h60High, high)
-
-h30LongRaw = enableFlip and flip30m and not na(h30Open) and h30Below and close > h30Open
-h60LongRaw = enableFlip and flip1h and not na(h60Open) and h60Below and close > h60Open
-h30ShortRaw = enableFlip and flip30m and not na(h30Open) and h30Above and close < h30Open
-h60ShortRaw = enableFlip and flip1h and not na(h60Open) and h60Above and close < h60Open
-
-// The flip is the moment of the cross, not the state that persists after it.
-h30Long = h30LongRaw and (not h30LongRaw[1] or is_new_30m)
-h60Long = h60LongRaw and (not h60LongRaw[1] or is_new_1h)
-h30Short = h30ShortRaw and (not h30ShortRaw[1] or is_new_30m)
-h60Short = h60ShortRaw and (not h60ShortRaw[1] or is_new_1h)
-
-// The wick of the flipping HTF candle must itself have reached the zone, so a
-// flip that happens once price has left the zone can't trigger an entry.
-demandFlipSig = h30Long or h60Long
-demandFlipLow = h30Long ? h30Low : h60Long ? h60Low : na
-supplyFlipSig = h30Short or h60Short
-supplyFlipHigh = h30Short ? h30High : h60Short ? h60High : na
+isHTFOpen = enableFlip and (flip30m and is_new_30m or flip1h and is_new_1h)
 
 //=====================================================
 // SECTION 6 — DETECTION ENGINE
@@ -710,16 +636,6 @@ var bool[]   deathIsDem  = array.new_bool()
 var float[]  deathTop    = array.new_float()
 var float[]  deathBot    = array.new_float()
 
-// Entry log — one row per entry signal that fired, taken or not.
-var string[] entKind   = array.new_string()
-var string[] entStatus = array.new_string()
-var int[]    entBar    = array.new_int()
-var int[]    entState  = array.new_int()
-var bool[]   entIsDem  = array.new_bool()
-var float[]  entPrice  = array.new_float()
-var float[]  entStop   = array.new_float()
-var float[]  entZTop   = array.new_float()
-
 //=====================================================
 // SECTION 8 — DRAW HELPERS
 //=====================================================
@@ -744,25 +660,6 @@ logDeath(bool isDemand, float zT, float zB, int st, string reason) =>
                   style=isDemand ? label.style_label_down : label.style_label_up,
                   color=#00000000, textcolor=color.new(color.gray, 5), size=size.tiny)
 
-logEntry(bool isDemand, string kind, float entryP, float slP, float zT, int st, string status) =>
-    array.push(entKind,   kind)
-    array.push(entStatus, status)
-    array.push(entBar,    bar_index)
-    array.push(entState,  st)
-    array.push(entIsDem,  isDemand)
-    array.push(entPrice,  entryP)
-    array.push(entStop,   slP)
-    array.push(entZTop,   zT)
-    while array.size(entKind) > 40
-        array.shift(entKind)
-        array.shift(entStatus)
-        array.shift(entBar)
-        array.shift(entState)
-        array.shift(entIsDem)
-        array.shift(entPrice)
-        array.shift(entStop)
-        array.shift(entZTop)
-
 drawBoS(int pivotBar, float pivotPrice, color col, bool above) =>
     line.new(pivotBar, pivotPrice, bar_index, pivotPrice,
              color=col, style=line.style_dashed, width=1)
@@ -785,8 +682,8 @@ drawTrade(float entryP, float slP, bool isLong) =>
                   style=label.style_label_left, color=#00000000,
                   textcolor=color.new(#00C087, 0), size=size.small)
 
-zoneLabelText(bool isDemand, int state, bool isFVG) =>
-    base = (isDemand ? "DEMAND" : "SUPPLY") + (isFVG ? " (FVG)" : "")
+zoneLabelText(bool isDemand, int state) =>
+    base = isDemand ? "DEMAND" : "SUPPLY"
     string outTxt = base
     if state == 0
         outTxt := base + " · 0 hunting liquidity"
@@ -846,9 +743,12 @@ var string[] trKind = array.new_string()  // "CLOSE" / "BOC" / "FLIP" — which 
 var int[] trSession = array.new_int()     // 0=Asia 1=London 2=NY 3=Overlap 4=Off-hours
 var int[] trTime = array.new_int()        // entry bar time, for month filtering
 
-// ── Target month (from Month/Year inputs, defaults to real-world current month) ──
-int tgtYear = statsYear
-int tgtMonth = statsMonth
+// ── Target month (real-world clock, walked back by monthOffset) ──────────────
+nowYear = year(timenow, "UTC")
+nowMonth = month(timenow, "UTC")
+totalMonths = nowYear * 12 + (nowMonth - 1) - monthOffset
+int tgtYear = int(math.floor(totalMonths / 12))
+int tgtMonth = int(totalMonths % 12) + 1
 tgtStamp = timestamp("UTC", tgtYear, tgtMonth, 1, 0, 0)
 
 // Session buckets: idx = bucket*4 + metric
@@ -935,6 +835,26 @@ entryMsg(string dir, string kind, float entryP, float slP, bool isLong, bool all
      '{"name":"Session","value":"' + sessTxt + '","inline":true}' +
      ']}'
 
+invalidMsg(string dir, float zTop, float zBot) =>
+    title = jsonEscape((dir == "BUY" ? "⚪ BUY" : "⚪ SELL") + " ZONE DEAD — " + syminfo.ticker)
+    sessTxt = jsonEscape(sessionTag(tradeAllowed))
+    '{"title":"' + title + '","description":"Candle closed inside the zone — setup invalid, do not enter.","color":' + str.tostring(COL_DEAD) +
+     ',"fields":[' +
+     '{"name":"Zone","value":"' + str.tostring(zBot, format.mintick) + " – " + str.tostring(zTop, format.mintick) + '","inline":true},' +
+     '{"name":"Close","value":"' + str.tostring(close, format.mintick) + '","inline":true},' +
+     '{"name":"Session","value":"' + sessTxt + '","inline":true}' +
+     ']}'
+
+preArmMsg(string dir, float zTop, float zBot) =>
+    title = jsonEscape((dir == "BUY" ? "⚫ BUY" : "⚫ SELL") + " ZONE KILLED PRE-ARM — " + syminfo.ticker)
+    sessTxt = jsonEscape(sessionTag(tradeAllowed))
+    '{"title":"' + title + '","description":"Tapped before liquidity + BoS confirmed — never became tradeable.","color":' + str.tostring(COL_DEAD) +
+     ',"fields":[' +
+     '{"name":"Zone","value":"' + str.tostring(zBot, format.mintick) + " – " + str.tostring(zTop, format.mintick) + '","inline":true},' +
+     '{"name":"Price","value":"' + str.tostring(close, format.mintick) + '","inline":true},' +
+     '{"name":"Session","value":"' + sessTxt + '","inline":true}' +
+     ']}'
+
 kindToModelIdx(string kind) =>
     kind == "CLOSE" ? 0 : kind == "BOC" ? 1 : 2
 
@@ -953,17 +873,12 @@ registerTrade(float entryP, float slP, bool isLong, string kind) =>
         array.push(trSession, sessionBucket())
         array.push(trTime, time)
 
-// Finalises a demand zone with an entry. Outside the RD session the signal is
-// flagged but the zone is left untouched, so it stays tradeable when the
-// session opens. Returns true if a trade was actually taken.
+// Finalises a demand zone with an entry (or a skipped entry if outside session).
+// Returns true if a trade was actually taken.
 entryDemand(box zone, line liqLn, int i, string kind, float entryP, float slP, color borderCol) =>
     zTop = box.get_top(zone)
     zBot = box.get_bottom(zone)
     allowed = tradeAllowed
-    // Stop sits below the whole zone — the wick didn't just tap it, it blew
-    // straight through. Still shown on chart with its TP/SL, but excluded
-    // from stats since it wasn't a clean tap-and-reject entry.
-    wickedThrough = slP < zBot
     if showEntries
         label.new(bar_index, low,
                   allowed ? "ENTRY ▲ | " + kind : "SKIP ▲ | " + kind,
@@ -972,41 +887,21 @@ entryDemand(box zone, line liqLn, int i, string kind, float entryP, float slP, c
                   textcolor=color.white, size=size.small)
         if allowed
             drawTrade(entryP, slP, true)
-    logEntry(true, kind, entryP, slP, zTop, array.get(demandState, i),
-             not allowed ? "SKIP" : wickedThrough ? "WICK" : "TAKEN")
-    if not allowed
-        // The setup triggered outside the session, so it is spent. Grey the
-        // zone out and retire it rather than leaving it live to fire again
-        // later, far from the zone and at a much worse price.
-        logDeath(true, zTop, zBot, array.get(demandState, i), "out of session")
-        box.set_right(zone, bar_index)
-        box.set_bgcolor(zone, invalidCol)
-        box.set_border_color(zone, color.new(color.gray, 30))
-        box.set_border_width(zone, 1)
-        box.set_text(zone, "✗ OUT OF SESSION")
-        box.set_text_color(zone, color.new(color.gray, 10))
-        if not na(liqLn)
-            line.set_x2(liqLn, bar_index)
-        label.delete(array.get(demandLiqLabels, i))
-        array.set(demandInvalid, i, true)
+    resBox = box.new(
+         left=box.get_left(zone), top=zTop, right=bar_index, bottom=zBot,
+         bgcolor=allowed ? entryDemandCol : invalidCol,
+         border_color=allowed ? borderCol : color.gray,
+         text=allowed ? "ENTRY | " + kind : "SKIPPED | " + kind + " (session)",
+         text_color=allowed ? borderCol : color.gray, text_size=size.small)
+    array.push(demandResultBoxes, resBox)
+    if array.size(demandResultBoxes) > 4
+        box.delete(array.shift(demandResultBoxes))
+    box.delete(zone)
+    if not na(liqLn)
+        line.set_x2(liqLn, bar_index)
+    array.set(demandInvalid, i, true)
     if allowed
-        resBg = wickedThrough ? invalidCol : entryDemandCol
-        resBorder = wickedThrough ? color.gray : borderCol
-        resTxt = wickedThrough ? "ENTRY | " + kind + " (wicked through — not counted)" : "ENTRY | " + kind
-        resBox = box.new(
-             left=box.get_left(zone), top=zTop, right=bar_index, bottom=zBot,
-             bgcolor=resBg, border_color=resBorder,
-             text=resTxt,
-             text_color=resBorder, text_size=size.small)
-        array.push(demandResultBoxes, resBox)
-        if array.size(demandResultBoxes) > 4
-            box.delete(array.shift(demandResultBoxes))
-        box.delete(zone)
-        if not na(liqLn)
-            line.set_x2(liqLn, bar_index)
-        array.set(demandInvalid, i, true)
-        if not wickedThrough
-            registerTrade(entryP, slP, true, kind)
+        registerTrade(entryP, slP, true, kind)
     if alertOnEntry and alertsAllowed(allowed)
         array.push(msgQueue, entryMsg("BUY", kind, entryP, slP, true, allowed))
     allowed
@@ -1015,10 +910,6 @@ entrySupply(box zone, line liqLn, int i, string kind, float entryP, float slP, c
     zTop = box.get_top(zone)
     zBot = box.get_bottom(zone)
     allowed = tradeAllowed
-    // Stop sits above the whole zone — the wick didn't just tap it, it blew
-    // straight through. Still shown on chart with its TP/SL, but excluded
-    // from stats since it wasn't a clean tap-and-reject entry.
-    wickedThrough = slP > zTop
     if showEntries
         label.new(bar_index, high,
                   allowed ? "ENTRY ▼ | " + kind : "SKIP ▼ | " + kind,
@@ -1027,41 +918,21 @@ entrySupply(box zone, line liqLn, int i, string kind, float entryP, float slP, c
                   textcolor=color.white, size=size.small)
         if allowed
             drawTrade(entryP, slP, false)
-    logEntry(false, kind, entryP, slP, zBot, array.get(supplyState, i),
-             not allowed ? "SKIP" : wickedThrough ? "WICK" : "TAKEN")
-    if not allowed
-        // The setup triggered outside the session, so it is spent. Grey the
-        // zone out and retire it rather than leaving it live to fire again
-        // later, far from the zone and at a much worse price.
-        logDeath(false, zTop, zBot, array.get(supplyState, i), "out of session")
-        box.set_right(zone, bar_index)
-        box.set_bgcolor(zone, invalidCol)
-        box.set_border_color(zone, color.new(color.gray, 30))
-        box.set_border_width(zone, 1)
-        box.set_text(zone, "✗ OUT OF SESSION")
-        box.set_text_color(zone, color.new(color.gray, 10))
-        if not na(liqLn)
-            line.set_x2(liqLn, bar_index)
-        label.delete(array.get(supplyLiqLabels, i))
-        array.set(supplyInvalid, i, true)
+    resBox = box.new(
+         left=box.get_left(zone), top=zTop, right=bar_index, bottom=zBot,
+         bgcolor=allowed ? entrySupplyCol : invalidCol,
+         border_color=allowed ? borderCol : color.gray,
+         text=allowed ? "ENTRY | " + kind : "SKIPPED | " + kind + " (session)",
+         text_color=allowed ? borderCol : color.gray, text_size=size.small)
+    array.push(supplyResultBoxes, resBox)
+    if array.size(supplyResultBoxes) > 4
+        box.delete(array.shift(supplyResultBoxes))
+    box.delete(zone)
+    if not na(liqLn)
+        line.set_x2(liqLn, bar_index)
+    array.set(supplyInvalid, i, true)
     if allowed
-        resBg = wickedThrough ? invalidCol : entrySupplyCol
-        resBorder = wickedThrough ? color.gray : borderCol
-        resTxt = wickedThrough ? "ENTRY | " + kind + " (wicked through — not counted)" : "ENTRY | " + kind
-        resBox = box.new(
-             left=box.get_left(zone), top=zTop, right=bar_index, bottom=zBot,
-             bgcolor=resBg, border_color=resBorder,
-             text=resTxt,
-             text_color=resBorder, text_size=size.small)
-        array.push(supplyResultBoxes, resBox)
-        if array.size(supplyResultBoxes) > 4
-            box.delete(array.shift(supplyResultBoxes))
-        box.delete(zone)
-        if not na(liqLn)
-            line.set_x2(liqLn, bar_index)
-        array.set(supplyInvalid, i, true)
-        if not wickedThrough
-            registerTrade(entryP, slP, false, kind)
+        registerTrade(entryP, slP, false, kind)
     if alertOnEntry and alertsAllowed(allowed)
         array.push(msgQueue, entryMsg("SELL", kind, entryP, slP, false, allowed))
     allowed
@@ -1070,6 +941,8 @@ closedInsideDemand(box zone, line liqLn, int i) =>
     zTopD = box.get_top(zone)
     zBotD = box.get_bottom(zone)
     logDeath(true, zTopD, zBotD, array.get(demandState, i), "closed inside")
+    if alertOnInvalid and array.get(demandTapAlerted, i) and alertsAllowed(tradeAllowed)
+        array.push(msgQueue, invalidMsg("BUY", zTopD, zBotD))
     deadBox = box.new(
          left=box.get_left(zone), top=box.get_top(zone), right=bar_index, bottom=box.get_bottom(zone),
          bgcolor=invalidCol, border_color=color.gray,
@@ -1087,6 +960,8 @@ closedInsideSupply(box zone, line liqLn, int i) =>
     zTopS = box.get_top(zone)
     zBotS = box.get_bottom(zone)
     logDeath(false, zTopS, zBotS, array.get(supplyState, i), "closed inside")
+    if alertOnInvalid and array.get(supplyTapAlerted, i) and alertsAllowed(tradeAllowed)
+        array.push(msgQueue, invalidMsg("SELL", zTopS, zBotS))
     deadBox = box.new(
          left=box.get_left(zone), top=box.get_top(zone), right=bar_index, bottom=box.get_bottom(zone),
          bgcolor=invalidCol, border_color=color.gray,
@@ -1208,9 +1083,9 @@ if newDemand
                     setupHi := math.max(setupHi, high[o])
                 demandBox = box.new(
                      left=markBarAbs, top=zTop,
-                     right=bar_index, bottom=zBottom,
-                     bgcolor=demandCol, border_color=demandBorder, border_width=1,
-                     text=zoneLabelText(true, 0, demandHasFVGNow),
+                     right=bar_index + extendBars, bottom=zBottom,
+                     bgcolor=demandCol, border_color=demandHasFVGNow ? fvgBorder : demandBorder, border_width=1,
+                     text=zoneLabelText(true, 0),
                      text_color=demandBorder, text_size=size.small)
                 array.push(demandBoxes, demandBox)
                 array.push(demandInvalid, false)
@@ -1267,9 +1142,9 @@ if newSupply
                     setupLo := math.min(setupLo, low[o])
                 supplyBox = box.new(
                      left=markBarAbs, top=zTop,
-                     right=bar_index, bottom=zBottom,
-                     bgcolor=supplyCol, border_color=supplyBorder, border_width=1,
-                     text=zoneLabelText(false, 0, supplyHasFVGNow),
+                     right=bar_index + extendBars, bottom=zBottom,
+                     bgcolor=supplyCol, border_color=supplyHasFVGNow ? fvgBorder : supplyBorder, border_width=1,
+                     text=zoneLabelText(false, 0),
                      text_color=supplyBorder, text_size=size.small)
                 array.push(supplyBoxes, supplyBox)
                 array.push(supplyInvalid, false)
@@ -1354,6 +1229,8 @@ if barstate.isconfirmed and array.size(demandBoxes) > 0
         if state <= 1
             if low <= zTop
                 logDeath(true, zTop, zBot, state, "pre-arm tap")
+                if alertOnPreArmTap and alertsAllowed(tradeAllowed)
+                    array.push(msgQueue, preArmMsg("BUY", zTop, zBot))
                 if markPreArmTaps
                     box.set_right(zone, bar_index)
                     box.set_bgcolor(zone, invalidCol)
@@ -1401,7 +1278,7 @@ if barstate.isconfirmed and array.size(demandBoxes) > 0
                         array.set(demandLiqLow, i, dLiqLevel2)
                         array.set(demandOriginHi, i, dOriginHigh2)
                         array.set(demandState, i, 1)
-                        box.set_text(zone, zoneLabelText(true, 1, array.get(demandFVG, i)))
+                        box.set_text(zone, zoneLabelText(true, 1))
             else
                 // State 1 is PATIENT: price may wander freely. The zone arms
                 // only when the origin high is broken (BoS).
@@ -1430,7 +1307,7 @@ if barstate.isconfirmed and array.size(demandBoxes) > 0
                 if bosHit
                     drawBoS(createdBar, originHi, bosCol, true)
                     array.set(demandState, i, 2)
-                    box.set_text(zone, zoneLabelText(true, 2, array.get(demandFVG, i)))
+                    box.set_text(zone, zoneLabelText(true, 2))
                     box.set_border_width(zone, 2)
                     demandArmedNow := true
 
@@ -1445,19 +1322,21 @@ if barstate.isconfirmed and array.size(demandBoxes) > 0
                     closedInsideDemand(zone, liqLn, i)
                     continue
 
-                if demandFlipSig and array.get(demandWickMade, i)
-                    taken = entryDemand(zone, liqLn, i, "FLIP", high, low, color.new(#1E90FF, 0))
+                if isHTFOpen and close > open and array.get(demandWickMade, i)
+                    taken = entryDemand(zone, liqLn, i, "FLIP", close, low, color.new(#1E90FF, 0))
                     demandFlipNow := demandFlipNow or taken
                     if not taken
                         statSkipped += 1
                     continue
-                else if bocCounted and high > high[1]
+
+                if bocCounted and high > high[1]
                     taken = entryDemand(zone, liqLn, i, "BOC", high[1], low, color.new(#00BFFF, 0))
                     demandBOCNow := demandBOCNow or taken
                     if not taken
                         statSkipped += 1
                     continue
-                else if close > zTop and close > open
+
+                if close > zTop and close > open
                     taken = entryDemand(zone, liqLn, i, "CLOSE", close, low, color.new(#1E90FF, 0))
                     demandCloseNow := demandCloseNow or taken
                     if not taken
@@ -1483,19 +1362,21 @@ if barstate.isconfirmed and array.size(demandBoxes) > 0
 
             deepWick = array.get(demandDeepWick, i)
 
-            if demandFlipSig and demandFlipLow <= zTop
-                taken = entryDemand(zone, liqLn, i, "FLIP", high, low, color.new(#1E90FF, 0))
+            if isHTFOpen and close > open and low <= zTop
+                taken = entryDemand(zone, liqLn, i, "FLIP", close, deepWick, color.new(#1E90FF, 0))
                 demandFlipNow := demandFlipNow or taken
                 if not taken
                     statSkipped += 1
                 continue
-            else if bocCounted and low <= zTop and high > high[1]
+
+            if bocCounted and low <= zTop and high > high[1]
                 taken = entryDemand(zone, liqLn, i, "BOC", high[1], deepWick, color.new(#00BFFF, 0))
                 demandBOCNow := demandBOCNow or taken
                 if not taken
                     statSkipped += 1
                 continue
-            else if close > zTop and close > open
+
+            if close > zTop and close > open
                 taken = entryDemand(zone, liqLn, i, "CLOSE", close, deepWick, color.new(#1E90FF, 0))
                 demandCloseNow := demandCloseNow or taken
                 if not taken
@@ -1503,7 +1384,7 @@ if barstate.isconfirmed and array.size(demandBoxes) > 0
                 continue
 
         if not array.get(demandInvalid, i)
-            box.set_right(zone, bar_index)
+            box.set_right(zone, bar_index + extendBars)
 
 //=====================================================
 // SECTION 14 — SUPPLY STATE MACHINE
@@ -1550,6 +1431,8 @@ if barstate.isconfirmed and array.size(supplyBoxes) > 0
         if state <= 1
             if high >= zBot
                 logDeath(false, zTop, zBot, state, "pre-arm tap")
+                if alertOnPreArmTap and alertsAllowed(tradeAllowed)
+                    array.push(msgQueue, preArmMsg("SELL", zTop, zBot))
                 if markPreArmTaps
                     box.set_right(zone, bar_index)
                     box.set_bgcolor(zone, invalidCol)
@@ -1594,7 +1477,7 @@ if barstate.isconfirmed and array.size(supplyBoxes) > 0
                         array.set(supplyLiqHigh, i, zLiqS)
                         array.set(supplyOriginLo, i, zOriginS)
                         array.set(supplyState, i, 1)
-                        box.set_text(zone, zoneLabelText(false, 1, array.get(supplyFVG, i)))
+                        box.set_text(zone, zoneLabelText(false, 1))
             else
                 // State 1 is PATIENT: price may wander freely. The zone arms
                 // only when the origin low is broken (BoS).
@@ -1623,7 +1506,7 @@ if barstate.isconfirmed and array.size(supplyBoxes) > 0
                 if bosHit
                     drawBoS(createdBar, originLo, bearBosCol, false)
                     array.set(supplyState, i, 2)
-                    box.set_text(zone, zoneLabelText(false, 2, array.get(supplyFVG, i)))
+                    box.set_text(zone, zoneLabelText(false, 2))
                     box.set_border_width(zone, 2)
                     supplyArmedNow := true
 
@@ -1638,19 +1521,21 @@ if barstate.isconfirmed and array.size(supplyBoxes) > 0
                     closedInsideSupply(zone, liqLn, i)
                     continue
 
-                if supplyFlipSig and array.get(supplyWickMade, i)
-                    taken = entrySupply(zone, liqLn, i, "FLIP", low, high, color.new(#FFA500, 0))
+                if isHTFOpen and close < open and array.get(supplyWickMade, i)
+                    taken = entrySupply(zone, liqLn, i, "FLIP", close, high, color.new(#FFA500, 0))
                     supplyFlipNow := supplyFlipNow or taken
                     if not taken
                         statSkipped += 1
                     continue
-                else if bocCounted and low < low[1]
+
+                if bocCounted and low < low[1]
                     taken = entrySupply(zone, liqLn, i, "BOC", low[1], high, color.new(#FF69B4, 0))
                     supplyBOCNow := supplyBOCNow or taken
                     if not taken
                         statSkipped += 1
                     continue
-                else if close < zBot and close < open
+
+                if close < zBot and close < open
                     taken = entrySupply(zone, liqLn, i, "CLOSE", close, high, color.new(#FFA500, 0))
                     supplyCloseNow := supplyCloseNow or taken
                     if not taken
@@ -1676,19 +1561,21 @@ if barstate.isconfirmed and array.size(supplyBoxes) > 0
 
             deepWick = array.get(supplyDeepWick, i)
 
-            if supplyFlipSig and supplyFlipHigh >= zBot
-                taken = entrySupply(zone, liqLn, i, "FLIP", low, high, color.new(#FFA500, 0))
+            if isHTFOpen and close < open and high >= zBot
+                taken = entrySupply(zone, liqLn, i, "FLIP", close, deepWick, color.new(#FFA500, 0))
                 supplyFlipNow := supplyFlipNow or taken
                 if not taken
                     statSkipped += 1
                 continue
-            else if bocCounted and high >= zBot and low < low[1]
+
+            if bocCounted and high >= zBot and low < low[1]
                 taken = entrySupply(zone, liqLn, i, "BOC", low[1], deepWick, color.new(#FF69B4, 0))
                 supplyBOCNow := supplyBOCNow or taken
                 if not taken
                     statSkipped += 1
                 continue
-            else if close < zBot and close < open
+
+            if close < zBot and close < open
                 taken = entrySupply(zone, liqLn, i, "CLOSE", close, deepWick, color.new(#FFA500, 0))
                 supplyCloseNow := supplyCloseNow or taken
                 if not taken
@@ -1696,7 +1583,7 @@ if barstate.isconfirmed and array.size(supplyBoxes) > 0
                 continue
 
         if not array.get(supplyInvalid, i)
-            box.set_right(zone, bar_index)
+            box.set_right(zone, bar_index + extendBars)
 
 //=====================================================
 // SECTION 15 — TRADE STATS TABLE (V4.6)
@@ -2081,46 +1968,3 @@ if showDeathLog and barstate.islast
             table.cell(deathTable, 1, r + 1, ddem ? "DEM" : "SUP", text_color=dSideCol, text_size=size.tiny, bgcolor=dbg2)
             table.cell(deathTable, 2, r + 1, str.tostring(dst), text_color=color.new(color.white, 10), text_size=size.tiny, bgcolor=dbg2)
             table.cell(deathTable, 3, r + 1, drsn, text_color=dRsnCol, text_size=size.tiny, bgcolor=dbg2)
-
-//=====================================================
-// SECTION 19 — ENTRY LOG
-// Newest signal at the top. Rows sharing the same TOP came from the same zone,
-// so a zone firing more than once shows up as repeated TOP values.
-// STATUS: TAKEN = registered in stats. SKIP = blocked by the session filter.
-// WICK = taken but excluded from stats because the stop sat past the zone.
-//=====================================================
-
-var table entryTable = table.new(position.middle_right, 7, 22,
-     bgcolor=color.new(#1A1A2E, 10),
-     border_color=color.new(#444466, 60), border_width=1,
-     frame_color=color.new(#6666AA, 50), frame_width=1)
-
-if showEntryLog and barstate.islast
-    ehc = color.new(#AAAACC, 0)
-    ehb = color.new(#252540, 0)
-    table.cell(entryTable, 0, 0, "AGO",    text_color=ehc, text_size=size.tiny, bgcolor=ehb)
-    table.cell(entryTable, 1, 0, "SIDE",   text_color=ehc, text_size=size.tiny, bgcolor=ehb)
-    table.cell(entryTable, 2, 0, "MODEL",  text_color=ehc, text_size=size.tiny, bgcolor=ehb)
-    table.cell(entryTable, 3, 0, "ENTRY",  text_color=ehc, text_size=size.tiny, bgcolor=ehb)
-    table.cell(entryTable, 4, 0, "SL",     text_color=ehc, text_size=size.tiny, bgcolor=ehb)
-    table.cell(entryTable, 5, 0, "TOP",    text_color=ehc, text_size=size.tiny, bgcolor=ehb)
-    table.cell(entryTable, 6, 0, "STATUS", text_color=ehc, text_size=size.tiny, bgcolor=ehb)
-
-    en = array.size(entKind)
-    eshown = math.min(en, entryLogRows)
-    if eshown > 0
-        for r = 0 to eshown - 1
-            eidx = en - 1 - r
-            eago = bar_index - array.get(entBar, eidx)
-            edem = array.get(entIsDem, eidx)
-            esta = array.get(entStatus, eidx)
-            eSideCol = edem ? color.new(#00C087, 0) : color.new(#FF4D4D, 0)
-            eStaCol = esta == "TAKEN" ? color.new(#00C087, 0) : esta == "SKIP" ? color.new(color.gray, 10) : color.new(#FFD700, 0)
-            ebg = color.new(#1A1A2E, 10)
-            table.cell(entryTable, 0, r + 1, str.tostring(eago), text_color=color.new(color.white, 30), text_size=size.tiny, bgcolor=ebg)
-            table.cell(entryTable, 1, r + 1, edem ? "DEM" : "SUP", text_color=eSideCol, text_size=size.tiny, bgcolor=ebg)
-            table.cell(entryTable, 2, r + 1, array.get(entKind, eidx), text_color=color.new(color.white, 10), text_size=size.tiny, bgcolor=ebg)
-            table.cell(entryTable, 3, r + 1, str.tostring(array.get(entPrice, eidx), format.mintick), text_color=color.new(color.white, 10), text_size=size.tiny, bgcolor=ebg)
-            table.cell(entryTable, 4, r + 1, str.tostring(array.get(entStop, eidx), format.mintick), text_color=color.new(#FF4D4D, 20), text_size=size.tiny, bgcolor=ebg)
-            table.cell(entryTable, 5, r + 1, str.tostring(array.get(entZTop, eidx), format.mintick), text_color=color.new(color.white, 30), text_size=size.tiny, bgcolor=ebg)
-            table.cell(entryTable, 6, r + 1, esta + " s" + str.tostring(array.get(entState, eidx)), text_color=eStaCol, text_size=size.tiny, bgcolor=ebg)
