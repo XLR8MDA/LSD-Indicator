@@ -867,6 +867,10 @@ entryDemand(box zone, line liqLn, int i, string kind, float entryP, float slP, c
     zTop = box.get_top(zone)
     zBot = box.get_bottom(zone)
     allowed = tradeAllowed
+    // Stop sits below the whole zone — the wick didn't just tap it, it blew
+    // straight through. Still shown on chart with its TP/SL, but excluded
+    // from stats since it wasn't a clean tap-and-reject entry.
+    wickedThrough = slP < zBot
     if showEntries
         label.new(bar_index, low,
                   allowed ? "ENTRY ▲ | " + kind : "SKIP ▲ | " + kind,
@@ -875,12 +879,14 @@ entryDemand(box zone, line liqLn, int i, string kind, float entryP, float slP, c
                   textcolor=color.white, size=size.small)
         if allowed
             drawTrade(entryP, slP, true)
+    resBg = not allowed ? invalidCol : wickedThrough ? invalidCol : entryDemandCol
+    resBorder = not allowed ? color.gray : wickedThrough ? color.gray : borderCol
+    resTxt = not allowed ? "SKIPPED | " + kind + " (session)" : wickedThrough ? "ENTRY | " + kind + " (wicked through — not counted)" : "ENTRY | " + kind
     resBox = box.new(
          left=box.get_left(zone), top=zTop, right=bar_index, bottom=zBot,
-         bgcolor=allowed ? entryDemandCol : invalidCol,
-         border_color=allowed ? borderCol : color.gray,
-         text=allowed ? "ENTRY | " + kind : "SKIPPED | " + kind + " (session)",
-         text_color=allowed ? borderCol : color.gray, text_size=size.small)
+         bgcolor=resBg, border_color=resBorder,
+         text=resTxt,
+         text_color=resBorder, text_size=size.small)
     array.push(demandResultBoxes, resBox)
     if array.size(demandResultBoxes) > 4
         box.delete(array.shift(demandResultBoxes))
@@ -888,7 +894,7 @@ entryDemand(box zone, line liqLn, int i, string kind, float entryP, float slP, c
     if not na(liqLn)
         line.set_x2(liqLn, bar_index)
     array.set(demandInvalid, i, true)
-    if allowed
+    if allowed and not wickedThrough
         registerTrade(entryP, slP, true, kind)
     if alertOnEntry and alertsAllowed(allowed)
         array.push(msgQueue, entryMsg("BUY", kind, entryP, slP, true, allowed))
@@ -898,6 +904,10 @@ entrySupply(box zone, line liqLn, int i, string kind, float entryP, float slP, c
     zTop = box.get_top(zone)
     zBot = box.get_bottom(zone)
     allowed = tradeAllowed
+    // Stop sits above the whole zone — the wick didn't just tap it, it blew
+    // straight through. Still shown on chart with its TP/SL, but excluded
+    // from stats since it wasn't a clean tap-and-reject entry.
+    wickedThrough = slP > zTop
     if showEntries
         label.new(bar_index, high,
                   allowed ? "ENTRY ▼ | " + kind : "SKIP ▼ | " + kind,
@@ -906,12 +916,14 @@ entrySupply(box zone, line liqLn, int i, string kind, float entryP, float slP, c
                   textcolor=color.white, size=size.small)
         if allowed
             drawTrade(entryP, slP, false)
+    resBg = not allowed ? invalidCol : wickedThrough ? invalidCol : entrySupplyCol
+    resBorder = not allowed ? color.gray : wickedThrough ? color.gray : borderCol
+    resTxt = not allowed ? "SKIPPED | " + kind + " (session)" : wickedThrough ? "ENTRY | " + kind + " (wicked through — not counted)" : "ENTRY | " + kind
     resBox = box.new(
          left=box.get_left(zone), top=zTop, right=bar_index, bottom=zBot,
-         bgcolor=allowed ? entrySupplyCol : invalidCol,
-         border_color=allowed ? borderCol : color.gray,
-         text=allowed ? "ENTRY | " + kind : "SKIPPED | " + kind + " (session)",
-         text_color=allowed ? borderCol : color.gray, text_size=size.small)
+         bgcolor=resBg, border_color=resBorder,
+         text=resTxt,
+         text_color=resBorder, text_size=size.small)
     array.push(supplyResultBoxes, resBox)
     if array.size(supplyResultBoxes) > 4
         box.delete(array.shift(supplyResultBoxes))
@@ -919,7 +931,7 @@ entrySupply(box zone, line liqLn, int i, string kind, float entryP, float slP, c
     if not na(liqLn)
         line.set_x2(liqLn, bar_index)
     array.set(supplyInvalid, i, true)
-    if allowed
+    if allowed and not wickedThrough
         registerTrade(entryP, slP, false, kind)
     if alertOnEntry and alertsAllowed(allowed)
         array.push(msgQueue, entryMsg("SELL", kind, entryP, slP, false, allowed))

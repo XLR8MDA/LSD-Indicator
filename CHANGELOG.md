@@ -22,6 +22,10 @@ All notable changes to the LSD Zone Indicator are documented here.
 ### Fixed
 - `demandFVG` / `supplyFVG` were pushed on zone creation but never read back; they now
   drive the `(FVG)` zone-label tag at every state transition, not just at creation.
+- Restored the wicked-through exclusion from variant A: an entry whose stop sits beyond the
+  whole zone (the wick blew straight through rather than cleanly tapping and rejecting it)
+  is shown on chart tagged "(wicked through — not counted)" but no longer registered into
+  the trade-stats table.
 
 ## [4.7.0] — 2026-09-05
 

@@ -97,6 +97,19 @@ was replaced with the `statsMonthStr` / `statsYearStr` "Auto" dropdown pair used
 — Pine Script requires `input.*` defaults to be `const`, so "Auto" is the sentinel resolved
 against `timenow` at runtime. Add next year to the `statsYearStr` options list each January.
 
+### Wicked-through entries counted in stats — excluded again
+Not originally tracked here; found while restoring variant A behaviour. This base's
+`entryDemand()` / `entrySupply()` had silently dropped variant A's wicked-through check —
+every triggered entry was registered into the stats table via `registerTrade()`, even one
+where the stop sits on the far side of the whole zone (the wick blew straight through
+instead of cleanly tapping and rejecting it). Restored: such entries are still shown on
+chart with SL/TP, but tagged "(wicked through — not counted)" and excluded from
+`registerTrade()`, matching variant A.
+
+**Heads up:** this is the second silent behavioural gap found between the two variants
+(after the FVG-array one) — worth a closer side-by-side diff against variant A if more
+missing behaviour turns up.
+
 ---
 
 ## Conventions
