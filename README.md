@@ -22,14 +22,15 @@ Only an armed-and-tapped zone can fire. Three entry models are supported:
 
 - **CLOSE** — directional close back out of the zone
 - **BOC** — break of the prior candle
-- **FLIP** — higher-timeframe candle flip
+- **FLIP** — higher-timeframe candle open (true flip detection is pending — see TASKS.md)
 
 Zones that are tapped before arming, that close inside themselves, or that trigger outside
 the configured session are retired and greyed out rather than left live.
 
 ## Features
 
-- Supply/demand zone detection with FVG tagging, ATR-based size filter and overlap dedupe
+- Supply/demand zone detection with ATR-based size filter and overlap dedupe
+- FVG detection, marked with a gold zone border
 - Pullback-run liquidity engine with on-chart liquidity levels and BoS markers
 - Session logic (Asia / London / NY / overlap) on a **UTC** basis, with an "RD" tradable
   window (default 08:00–15:00 UTC) and a session dashboard
@@ -37,7 +38,8 @@ the configured session are retired and greyed out rather than left live.
   entry model and session
 - Live break-of-candle scanner and a liquidity debug panel
 - Zone death log — why each zone died and which state it was in
-- Unified alerts emitted as Discord-compatible JSON embeds
+- Unified alerts as Discord-compatible JSON embeds: on entry, on zone invalidation,
+  and optionally on pre-arm taps
 
 ## Installation
 
@@ -55,6 +57,7 @@ are no compiler errors or warnings.
 - `pine-viewer.html` — standalone, dependency-free `.pine` viewer with syntax highlighting;
   open directly in a browser
 - `CHANGELOG.md` — version history
+- `TASKS.md` — upcoming tasks and known defects
 - `CLAUDE.md` — working notes and conventions for this repository
 
 Reference screenshots (`rdforex/`) and the source strategy transcripts (`transcripts/`) are
