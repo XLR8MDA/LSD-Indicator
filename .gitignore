@@ -5,5 +5,8 @@
 transcripts/
 rdforex/
 
+# here.now publish-state cache (local machine state, not site content)
+.herenow/
+
 # macOS
 .DS_Store
