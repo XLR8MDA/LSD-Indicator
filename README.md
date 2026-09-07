@@ -29,7 +29,8 @@ the configured session are retired and greyed out rather than left live.
 
 ## Features
 
-- Supply/demand zone detection with ATR-based size filter and overlap dedupe
+- Supply/demand zone detection with ATR-based size filter, overlap dedupe, and a
+  cooldown so a consumed zone can't immediately re-mark at the same price
 - FVG detection, tagged `(FVG)` in the zone label
 - Pullback-run liquidity engine with on-chart liquidity levels and BoS markers
 - Session logic (Asia / London / NY / overlap) on a **UTC** basis, with an "RD" tradable

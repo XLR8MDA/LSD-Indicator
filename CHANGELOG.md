@@ -14,6 +14,11 @@ All notable changes to the LSD Zone Indicator are documented here.
 - Gold `fvgBorder` zone border — FVG is now indicated by a `(FVG)` tag in the zone label
   text instead, restored from variant A's `zoneLabelText(isDemand, state, isFVG)`
 
+### Added
+- `zoneCooldownBars` input (default 30, 0 disables): after a zone is consumed — entry
+  taken, entry skipped, closed through, pre-arm tap, or aged out — a new zone can't be
+  marked at the same price for this many bars.
+
 ### Changed
 - Trade-stats month filter: replaced the `monthOffset` integer input with `statsMonthStr`
   / `statsYearStr` "Auto" dropdowns (variant A's original design). "Auto" resolves against
@@ -26,6 +31,10 @@ All notable changes to the LSD Zone Indicator are documented here.
   whole zone (the wick blew straight through rather than cleanly tapping and rejecting it)
   is shown on chart tagged "(wicked through — not counted)" but no longer registered into
   the trade-stats table.
+- A consumed zone (entry taken, entry skipped, closed through, pre-arm tap, or aged out)
+  could be immediately re-marked at the same price, because the 70% overlap dedupe in zone
+  creation only compared against zones still flagged valid. The dying zone's top/bottom
+  is now retained for `zoneCooldownBars` bars and checked by the same dedupe.
 
 ## [4.7.0] — 2026-09-05
 

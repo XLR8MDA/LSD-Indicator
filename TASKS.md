@@ -11,33 +11,7 @@ commit `8beae64`, which carries several features this base does not.
 
 ## Defects
 
-### 1. Zone re-marked at the same price immediately after an entry
-**Priority: high** · confirmed in code
-
-When an entry fires, `entryDemand()` / `entrySupply()` delete the live zone box and flag the
-zone `demandInvalid` / `supplyInvalid = true`. One or two bars later the entry impulse candle
-itself qualifies as a new marking candle, so a fresh zone is drawn at effectively the same
-price and keeps extending — the zone appears to "stop, then restart".
-
-The 70% overlap dedupe is supposed to suppress this, but it only compares against zones still
-flagged valid:
-
-```pine
-if not array.get(supplyInvalid, ck)          // line 1131 (demand: line 1072)
-    eTop = box.get_top(array.get(supplyBoxes, ck))
-```
-
-The just-consumed zone is excluded from the comparison, so `isOverlap_s` stays false.
-
-Removing the guard is not a fix — the box behind an invalidated zone has been `box.delete()`d,
-so `box.get_top()` on it is unsafe. The fix needs the consumed zone's top/bottom retained
-separately (e.g. a short-lived "recently consumed levels" array with an expiry) that the
-overlap check also scans.
-
-**Open decision:** should suppression expire after a fixed number of bars, or persist until
-price has moved a set distance (× ATR) away from the zone?
-
-### 2. Liquidity debug panel silently switches zones
+### 1. Liquidity debug panel silently switches zones
 **Priority: low** · documented in the tooltip at line 52
 
 The panel always reports whichever zone is newest with `state >= 1`, not a zone you pinned, so
@@ -47,7 +21,7 @@ it changes subject without warning. Add a way to pin the panel to one zone.
 
 ## Features to port from variant A (`8beae64`)
 
-### 3. True HTF candle-flip detection
+### 2. True HTF candle-flip detection
 **Priority: high**
 
 The base fires the FLIP model on `isHTFOpen` — any new 30m/1h candle opening. That is not a
@@ -59,7 +33,7 @@ flipping candle's wick actually reached the zone.
 Port A's SECTION 5 and the `demandFlipSig` / `supplyFlipSig` / `demandFlipLow` /
 `supplyFlipHigh` wiring into the state machines.
 
-### 4. Entry log panel
+### 3. Entry log panel
 **Priority: medium**
 
 A's SECTION 19 plus `logEntry()` and its eight backing arrays: one row per entry signal that
@@ -70,6 +44,24 @@ for working out why a setup did or did not trade.
 ---
 
 ## Resolved
+
+### Zone re-marked at the same price immediately after an entry — fixed
+Fixed in `chore/cleanup-alerts-fvg-monthly-stats`. When a zone was consumed — entry taken,
+entry skipped, closed through, pre-arm tap, or aged out — `entryDemand()` / `entrySupply()`
+and the state machines deleted the box and flagged it invalid, but the 70% overlap dedupe in
+zone creation only compared against zones still flagged valid, so the just-consumed zone
+dropped out of the comparison. The entry impulse candle itself could then immediately
+re-qualify as a new marking candle at the same price, and a fresh zone would keep extending
+right where the old one had stopped.
+
+Added a `zoneCooldownBars` input (default 30, 0 disables) plus `retireDemandZone()` /
+`retireSupplyZone()`, called at all five demand and five supply invalidation points, which
+record the dying zone's top/bottom/bar into a short `deadDemandTop/Bot/Bar` /
+`deadSupplyTop/Bot/Bar` array (capped at 40, same pattern as the zone death log).
+`zoneOverlapsCooldown()` — shared by both sides — extends the existing overlap check to also
+reject a new zone that overlaps ≥70% of its range with one of these still-cooling entries.
+Suppression expires after `zoneCooldownBars` bars, chosen over an ATR-distance rule for
+simplicity; revisit if a price-distance-based cooldown proves better in testing.
 
 ### `alertFormat` input did nothing — removed
 Fixed in `chore/cleanup-alerts-fvg-monthly-stats`. The input offered "Plain Text" /

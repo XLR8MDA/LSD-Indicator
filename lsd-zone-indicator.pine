@@ -8,6 +8,9 @@ indicator("LSD Zone Detector V4.7", overlay=true, max_boxes_count=500, max_lines
 grpDetect = "Zone Detection"
 extendBars = input.int(50, "Zone Extension (bars)", minval=10, group=grpDetect)
 maxZones = input.int(20, "Max Zones Per Side", minval=1, group=grpDetect)
+zoneCooldownBars = input.int(30, "Zone Re-Mark Cooldown (bars)", minval=0, maxval=500,
+                tooltip="After a zone is consumed — entry taken, entry skipped, closed through, pre-arm tap, or aged out — a new zone can't be marked at the same price for this many bars. Prevents the entry candle itself immediately re-qualifying as a fresh zone. 0 disables.",
+                group=grpDetect)
 lookbackBars = input.int(30, "Marking Candle Lookback", minval=5, maxval=60,
                 tooltip="How far back to search for the marking candle.", group=grpDetect)
 minImpulse = input.int(2, "Min Impulse Candles", minval=1, maxval=6,
@@ -647,6 +650,19 @@ var bool[]   deathIsDem  = array.new_bool()
 var float[]  deathTop    = array.new_float()
 var float[]  deathBot    = array.new_float()
 
+// ── Zone re-mark cooldown ────────────────────────────────────────────────────
+// Every consumed zone (entry taken, entry skipped, closed through, pre-arm
+// tap, aged out) records its top/bottom/death-bar here, so the zone-creation
+// overlap check can also reject a new zone re-marking the same price too soon
+// — not just zones that are still live. Declared here for the same reason as
+// the death log above: retireDemandZone()/retireSupplyZone() live in Section 8.
+var float[] deadDemandTop = array.new_float()
+var float[] deadDemandBot = array.new_float()
+var int[]   deadDemandBar = array.new_int()
+var float[] deadSupplyTop = array.new_float()
+var float[] deadSupplyBot = array.new_float()
+var int[]   deadSupplyBar = array.new_int()
+
 //=====================================================
 // SECTION 8 — DRAW HELPERS
 //=====================================================
@@ -670,6 +686,43 @@ logDeath(bool isDemand, float zT, float zB, int st, string reason) =>
                   "☠ " + reason + " s" + str.tostring(st),
                   style=isDemand ? label.style_label_down : label.style_label_up,
                   color=#00000000, textcolor=color.new(color.gray, 5), size=size.tiny)
+
+retireDemandZone(float zT, float zB) =>
+    if zoneCooldownBars > 0
+        array.push(deadDemandTop, zT)
+        array.push(deadDemandBot, zB)
+        array.push(deadDemandBar, bar_index)
+        while array.size(deadDemandTop) > 40
+            array.shift(deadDemandTop)
+            array.shift(deadDemandBot)
+            array.shift(deadDemandBar)
+
+retireSupplyZone(float zT, float zB) =>
+    if zoneCooldownBars > 0
+        array.push(deadSupplyTop, zT)
+        array.push(deadSupplyBot, zB)
+        array.push(deadSupplyBar, bar_index)
+        while array.size(deadSupplyTop) > 40
+            array.shift(deadSupplyTop)
+            array.shift(deadSupplyBot)
+            array.shift(deadSupplyBar)
+
+// Shared by both sides' zone-creation dedupe: true if the candidate zone
+// (zT/zB) overlaps ≥70% of its own range with a zone that died within the
+// last zoneCooldownBars bars.
+zoneOverlapsCooldown(float zT, float zB, float rng, float[] dTop, float[] dBot, int[] dBar) =>
+    bool found = false
+    if zoneCooldownBars > 0 and array.size(dTop) > 0
+        for dk = 0 to array.size(dTop) - 1
+            if bar_index - array.get(dBar, dk) <= zoneCooldownBars
+                eTop = array.get(dTop, dk)
+                eBot = array.get(dBot, dk)
+                overlapHi = math.min(zT, eTop)
+                overlapLo = math.max(zB, eBot)
+                if overlapHi > overlapLo and (overlapHi - overlapLo) / rng >= 0.7
+                    found := true
+                    break
+    found
 
 drawBoS(int pivotBar, float pivotPrice, color col, bool above) =>
     line.new(pivotBar, pivotPrice, bar_index, pivotPrice,
@@ -893,6 +946,7 @@ entryDemand(box zone, line liqLn, int i, string kind, float entryP, float slP, c
     box.delete(zone)
     if not na(liqLn)
         line.set_x2(liqLn, bar_index)
+    retireDemandZone(zTop, zBot)
     array.set(demandInvalid, i, true)
     if allowed and not wickedThrough
         registerTrade(entryP, slP, true, kind)
@@ -930,6 +984,7 @@ entrySupply(box zone, line liqLn, int i, string kind, float entryP, float slP, c
     box.delete(zone)
     if not na(liqLn)
         line.set_x2(liqLn, bar_index)
+    retireSupplyZone(zTop, zBot)
     array.set(supplyInvalid, i, true)
     if allowed and not wickedThrough
         registerTrade(entryP, slP, false, kind)
@@ -951,6 +1006,7 @@ closedInsideDemand(box zone, line liqLn, int i) =>
     box.delete(zone)
     if not na(liqLn)
         line.set_x2(liqLn, bar_index)
+    retireDemandZone(zTopD, zBotD)
     label.delete(array.get(demandLiqLabels, i))
     array.set(demandInvalid, i, true)
 
@@ -968,6 +1024,7 @@ closedInsideSupply(box zone, line liqLn, int i) =>
     box.delete(zone)
     if not na(liqLn)
         line.set_x2(liqLn, bar_index)
+    retireSupplyZone(zTopS, zBotS)
     label.delete(array.get(supplyLiqLabels, i))
     array.set(supplyInvalid, i, true)
 
@@ -1074,6 +1131,8 @@ if newDemand
                             isOverlap_d := true
                             break
             if not isOverlap_d
+                isOverlap_d := zoneOverlapsCooldown(zTop, zBottom, newRange, deadDemandTop, deadDemandBot, deadDemandBar)
+            if not isOverlap_d
                 float setupHi = high
                 for o = 0 to demandMarkOff
                     setupHi := math.max(setupHi, high[o])
@@ -1132,6 +1191,8 @@ if newSupply
                         if overlapHi > overlapLo and (overlapHi - overlapLo) / newRange >= 0.7
                             isOverlap_s := true
                             break
+            if not isOverlap_s
+                isOverlap_s := zoneOverlapsCooldown(zTop, zBottom, newRange, deadSupplyTop, deadSupplyBot, deadSupplyBar)
             if not isOverlap_s
                 float setupLo = low
                 for o = 0 to supplyMarkOff
@@ -1199,6 +1260,7 @@ if barstate.isconfirmed and array.size(demandBoxes) > 0
             if not na(liqLn)
                 line.set_x2(liqLn, bar_index)
             label.delete(array.get(demandLiqLabels, i))
+            retireDemandZone(zTop, zBot)
             array.set(demandInvalid, i, true)
             continue
 
@@ -1219,6 +1281,7 @@ if barstate.isconfirmed and array.size(demandBoxes) > 0
             if not na(liqLn)
                 line.set_x2(liqLn, bar_index)
             label.delete(array.get(demandLiqLabels, i))
+            retireDemandZone(zTop, zBot)
             array.set(demandInvalid, i, true)
             continue
 
@@ -1237,6 +1300,7 @@ if barstate.isconfirmed and array.size(demandBoxes) > 0
                 if not na(liqLn)
                     line.set_x2(liqLn, bar_index)
                 label.delete(array.get(demandLiqLabels, i))
+                retireDemandZone(zTop, zBot)
                 array.set(demandInvalid, i, true)
                 continue
 
@@ -1406,6 +1470,7 @@ if barstate.isconfirmed and array.size(supplyBoxes) > 0
             if not na(liqLn)
                 line.set_x2(liqLn, bar_index)
             label.delete(array.get(supplyLiqLabels, i))
+            retireSupplyZone(zTop, zBot)
             array.set(supplyInvalid, i, true)
             continue
 
@@ -1419,6 +1484,7 @@ if barstate.isconfirmed and array.size(supplyBoxes) > 0
             if not na(liqLn)
                 line.set_x2(liqLn, bar_index)
             label.delete(array.get(supplyLiqLabels, i))
+            retireSupplyZone(zTop, zBot)
             array.set(supplyInvalid, i, true)
             continue
 
@@ -1437,6 +1503,7 @@ if barstate.isconfirmed and array.size(supplyBoxes) > 0
                 if not na(liqLn)
                     line.set_x2(liqLn, bar_index)
                 label.delete(array.get(supplyLiqLabels, i))
+                retireSupplyZone(zTop, zBot)
                 array.set(supplyInvalid, i, true)
                 continue
 
